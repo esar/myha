@@ -1,0 +1,9 @@
+[submodule "contiki"]
+	path = contiki
+	url = https://github.com/esar/contiki-6lbr.git
+[submodule "apps/mqtt-service"]
+	path = apps/mqtt-service
+	url = https://github.com/esar/contiki-mqtt.git
+[submodule "apps/rako-service"]
+	path = apps/rako-service
+	url = https://github.com/esar/contiki-rako.git

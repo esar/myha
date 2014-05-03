@@ -1,0 +1,36 @@
+CONTIKI_TARGET_DIRS = . apps net loader driver dev
+CONTIKI_CORE=contiki-avr-zigbit-myha
+CONTIKI_TARGET_MAIN = ${CONTIKI_CORE}.o
+
+CONTIKI_TARGET_SOURCEFILES +=	slip-arch.c slip.c rs232.c cfs-eeprom.c eeprom.c random.c \
+				mmem.c uart1.c node-id.c contiki-avr-zigbit-myha-main.c i2c.c
+
+CONTIKIAVR=$(CONTIKI)/cpu/avr
+CONTIKIBOARD=.
+
+CONTIKI_PLAT_DEFS = -DF_CPU=8000000UL -DAUTO_CRC_PADDING=2 -DUIP_CONF_IPV6
+#CONTIKI_PLAT_DEFS = -DF_CPU=16000000UL -DAUTO_CRC_PADDING=2
+
+MCU=atmega1281
+#AVRDUDE_PROGRAMMER=jtag2
+AVRDUDE_PROGRAMMER=avrispmkii
+
+# For usb devices, you may either use PORT=usb, or (e.g. if you have more than one
+# programmer connected) you can use the following trick to find out the serial number:
+#
+# The example is for an JTAGICE mkII used to program an ATmega128:
+# avrdude -v -P usb:xxxx -c jtag2 -p atmega128
+#AVRDUDE_PORT=usb:00B000000D79
+AVRDUDE_PORT=usb
+
+
+# Additional avrdude options
+# Verify off
+AVRDUDE_OPTIONS=-V
+
+
+include $(CONTIKIAVR)/Makefile.avr
+include $(CONTIKIAVR)/radio/Makefile.radio
+
+MODULES+=core/net/ip core/net/ipv4 core/net core/net/rpl \
+         core/net/ipv6 core/net/rime core/net/mac core/net/mac/sicslowmac
