@@ -6,18 +6,29 @@
 #include "contiki-net.h"
 #include "net/rpl/rpl.h"
 
+#include "myha.h"
+
 #include <avr/io.h>
 #define TRUE 1
 #define FALSE 0
 
 PROCESS(myha_process, "Myha");
 
-AUTOSTART_PROCESSES(&resolv_process, &myha_process);
+static uip_ipaddr_t current_addr;
+static uip_ipaddr_t server_addr;
 
-PROCESS_NAME(udp_client_process);
-PROCESS_NAME(mqtt_client_process);
 
 /*---------------------------------------------------------------------------*/
+
+uip_ipaddr_t* myha_get_udp_address()
+{
+  return &current_addr;
+}
+
+uip_ipaddr_t* myha_get_mqtt_address()
+{
+  return &server_addr;
+}
 
 resolv_status_t lookup_server_address(const char* name, uip_ipaddr_t* address)
 {
@@ -56,12 +67,6 @@ PROCESS_THREAD(myha_process, ev, data)
   static uip_ipaddr_t current_addr;
   static uip_ipaddr_t server_addr;
   static int have_addr = FALSE;
-  static struct process* process_array[] = 
-  {
-    &udp_client_process,
-    &mqtt_client_process
-  };
-
 
   PROCESS_BEGIN();
 
@@ -83,7 +88,7 @@ PROCESS_THREAD(myha_process, ev, data)
       if(dag != NULL)
       {
         uip_ipaddr_t new_addr;
-        resolv_status_t resolv_status;
+//        resolv_status_t resolv_status;
 
         uip_ipaddr_copy(&new_addr, global_addr);
         memcpy(&new_addr.u8[8], &dag->dag_id.u8[8], sizeof(uip_ipaddr_t) / 2);
@@ -95,16 +100,16 @@ PROCESS_THREAD(myha_process, ev, data)
             printf("root address has changed, killing processes...\n");
 
             // tell all processes to exit
-            for(i = 0; i < sizeof(process_array) / sizeof(*process_array); ++i)
-              process_exit(process_array[i]);
+            for(i = 0; myha_autostart_processes[i] != NULL; ++i)
+              process_exit(myha_autostart_processes[i]);
 
             // wait for all processes to exit
             while(TRUE)
             {
-              for(i = 0; i < sizeof(process_array) / sizeof(*process_array); ++i)
-                if(process_is_running(process_array[i]))
+              for(i = 0; myha_autostart_processes[i] != NULL; ++i)
+                if(process_is_running(myha_autostart_processes[i]))
                   break;
-              if(i >= sizeof(process_array) / sizeof(*process_array))
+              if(myha_autostart_processes[i] == NULL)
                 break;
             }
           }
@@ -112,6 +117,7 @@ PROCESS_THREAD(myha_process, ev, data)
           uip_ipaddr_copy(&current_addr, &new_addr);
           have_addr = TRUE;
 
+/*
           // lookup the server address
           resolv_status = RESOLV_STATUS_UNCACHED;
           while(resolv_status != RESOLV_STATUS_CACHED)
@@ -131,11 +137,13 @@ PROCESS_THREAD(myha_process, ev, data)
               goto TRY_AGAIN;
             }
           }
+*/
+          uiplib_ipaddrconv("bbbb::1", &server_addr);
 
           // start the processes
           printf("starting processes...\n");
-          for(i = 0; i < sizeof(process_array) / sizeof(*process_array); ++i)
-            process_start(process_array[i], (char*)&current_addr);
+          for(i = 0; myha_autostart_processes[i] != NULL; ++i)
+            process_start(myha_autostart_processes[i], NULL);
 
           printf("done, everything should be running.\n");
         }

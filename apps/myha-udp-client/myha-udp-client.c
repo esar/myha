@@ -37,6 +37,8 @@
 #include "dev/radio-sensor.h"
 #endif
 
+#include "myha.h"
+
 #include <string.h>
 
 #define DEBUG 1
@@ -63,7 +65,7 @@ int udp_client_rssi = 0;
 #endif
 
 /*---------------------------------------------------------------------------*/
-PROCESS(udp_client_process, "UDP client process");
+PROCESS(myha_udp_client_process, "UDP client process");
 /*---------------------------------------------------------------------------*/
 static void
 tcpip_handler(struct uip_udp_conn* conn)
@@ -158,7 +160,7 @@ void send(struct uip_udp_conn* conn)
 }
 
 /*---------------------------------------------------------------------------*/
-PROCESS_THREAD(udp_client_process, ev, data)
+PROCESS_THREAD(myha_udp_client_process, ev, data)
 {
   static struct etimer et;
   static uip_ipaddr_t* address;
@@ -167,12 +169,9 @@ PROCESS_THREAD(udp_client_process, ev, data)
   PROCESS_BEGIN();
   PRINTF("UDP client process started\n");
 
-    if(ev == PROCESS_EVENT_INIT)
-    {
-      PRINTF("udp got address\n");
-      address = (uip_ipaddr_t*)data;
-      PRINT6ADDR(address);
-    }
+  address = myha_get_udp_address();
+  PRINTF("udp got address\n");
+  PRINT6ADDR(address);
 
   etimer_set(&et, udp_interval);
   for(;;)
