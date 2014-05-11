@@ -1,0 +1,4 @@
+*.a
+*.map
+*.avr-zigbit-myha
+obj_avr-zigbit-myha
