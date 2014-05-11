@@ -19,6 +19,7 @@ PROCESS(myha_process, "Myha");
 
 static uip_ipaddr_t current_addr;
 static uip_ipaddr_t server_addr;
+static char node_id[17];
 
 
 /*---------------------------------------------------------------------------*/
@@ -31,6 +32,11 @@ uip_ipaddr_t* myha_get_udp_address()
 uip_ipaddr_t* myha_get_mqtt_address()
 {
   return &server_addr;
+}
+
+const char* myha_get_node_id()
+{
+  return node_id;
 }
 
 resolv_status_t lookup_server_address(const char* name, uip_ipaddr_t* address)
@@ -72,6 +78,12 @@ PROCESS_THREAD(myha_process, ev, data)
   PROCESS_BEGIN();
 
   memset(&current_addr, 0, sizeof(current_addr));
+
+  snprintf_P(node_id, sizeof(node_id), PSTR("%02x%02x%02x%02x%02x%02x%02x%02x/"), 
+             linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1],
+             linkaddr_node_addr.u8[2], linkaddr_node_addr.u8[3],
+             linkaddr_node_addr.u8[4], linkaddr_node_addr.u8[5],
+             linkaddr_node_addr.u8[6], linkaddr_node_addr.u8[7]);
 
   // Wait for intial IP address
   etimer_set(&et, 1 * CLOCK_SECOND);

@@ -38,3 +38,4 @@ CLIF extern struct process * const myha_autostart_processes[];
 
 uip_ipaddr_t* myha_get_udp_address();
 uip_ipaddr_t* myha_get_mqtt_address();
+const char* myha_get_node_id();
