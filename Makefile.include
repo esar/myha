@@ -6,9 +6,9 @@ UDP_PERIOD?=5
 WITH_UDP_CLIENT_AUTOSTART?=1
 
 
-CONTIKI?=../contiki
-TARGETDIRS += ../platform
-APPDIRS += ../apps
+CONTIKI?=../../contiki
+TARGETDIRS += ../../platform
+APPDIRS += ../../apps
 PROJECTDIR?=.
 WITH_UIP6=1
 UIP_CONF_IPV6=1
@@ -36,6 +36,6 @@ CFLAGS += -DUDP_CLIENT_AUTOSTART=1
 endif
 
 SMALL=1
-CFLAGS += -DPROJECT_CONF_H=\"../project-conf.h\"
+CFLAGS += -DPROJECT_CONF_H=\"../../project-conf.h\"
 
 include $(CONTIKI)/Makefile.include
