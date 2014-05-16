@@ -28,6 +28,7 @@
 
 #define FADE_TIMER_TICKS_PER_SECOND  1000
 #define NUM_DIMMER_CHANNELS 6
+#define MANUAL_FADE_DELTA 10000
 
 PROCESS(led_dimmer_6ch_process, "LED Dimmer 6 Channel process");
 
@@ -36,6 +37,18 @@ PROCESS_NAME(myha_udp_client_process);
 
 AUTOSTART_PROCESSES(&myha_process);
 MYHA_AUTOSTART_PROCESSES(&myha_udp_client_process, &led_dimmer_6ch_process);
+
+uint8_t profile[64] PROGMEM = 
+{
+    0,   1,   2,   3,   4,   5,   6,   7,
+    9,  10,  11,  13,  14,  16,  18,  19,
+   21,  23,  25,  27,  29,  31,  33,  35,
+   38,  40,  43,  46,  48,  51,  54,  57,
+   60,  64,  67,  71,  75,  79,  83,  87,
+   91,  96, 100, 105, 110, 116, 121, 127,
+  133, 139, 145, 152, 159, 166, 173, 181,
+  189, 197, 206, 214, 224, 233, 243, 254
+};
 
 typedef struct dimmer_channel
 {
@@ -47,6 +60,55 @@ typedef struct dimmer_channel
 
 static dimmer_channel_t channels[NUM_DIMMER_CHANNELS];
 
+// multiply a 16bit integer by an 8bit integer, producing a 24bit result
+static inline uint32_t mul_16_8(uint16_t a, uint8_t b)
+{
+        uint32_t product;
+        asm (
+                "mul %A1, %2\n\t"
+                "movw %A0, r0\n\t"
+                "clr %C0\n\t"
+                "clr %D0\n\t"
+                "mul %B1, %2\n\t"
+                "add %B0, r0\n\t"
+                "adc %C0, r1\n\t"
+                "clr r1"
+                : "=&r" (product)
+                : "r" (a), "r" (b));
+        return product;
+}
+
+uint16_t get_profiled_level(uint16_t x)
+{
+  uint8_t x_i, x_f, p1, p2;
+
+  // scale 0->255 to 0->63
+  x >>= 2;
+
+  // split 8.8 fixed point into integer and fractional parts
+  x_i = x >> 8;
+  x_f = x & 0xff;
+
+  // lookup two points in the profile
+  p1 = pgm_read_byte(&profile[x_i]);
+  if(x_i < 63)
+    p2 = pgm_read_byte(&profile[x_i + 1]);
+  else
+    p2 = p1;
+
+  // linearly interpolate between the two points
+  // returning an 8.8 fixed point result
+  if(p2 > p1)
+  {
+    uint8_t diff = p2 - p1;
+    return (p1 << 8) + (mul_16_8(diff << 8, x_f) >> 8); 
+  }
+  else
+  {
+    uint8_t diff = p1 - p2;
+    return (p1 << 8) - (mul_16_8(diff << 8, x_f) >> 8);
+  }
+}
 
 static void fade_timer_enable()
 {
@@ -89,10 +151,11 @@ static void pwm_enable(int channel)
   }
 }
 
-static void set_level(int channel, int level)
+static void set_level_fp_8_8(int channel, uint16_t level)
 {
   uint8_t last;
 
+  level = get_profiled_level(level) >> 8; //pgm_read_byte(&profile[level >> 2]);
   switch(channel)
   {
     case 0: last = PWM_VALUE(CHAN1_PWM); PWM_VALUE(CHAN1_PWM) = level; break;
@@ -108,6 +171,11 @@ static void set_level(int channel, int level)
     pwm_enable(channel);
   else if(level == 0)
     pwm_disable(channel);
+}
+
+static void set_level(uint8_t channel, uint8_t level)
+{
+  set_level_fp_8_8(channel, (uint16_t)level << 8);
 }
 
 ISR(TIMER1_COMPC_vect)
@@ -126,7 +194,7 @@ ISR(TIMER1_COMPC_vect)
   {
     if(channels[i].delta != 0)
     {
-      uint16_t new_level;
+      uint8_t new_level;
 
       channels[i].level += channels[i].delta;
       new_level = channels[i].level >> 16;
@@ -134,14 +202,13 @@ ISR(TIMER1_COMPC_vect)
       if((channels[i].delta > 0 && new_level >= channels[i].target) ||
          (channels[i].delta < 0 && new_level <= channels[i].target))
       {
-        new_level = channels[i].target;
-        channels[i].level = (uint32_t)new_level << 16;
+        channels[i].level = (uint32_t)channels[i].target << 16;
         channels[i].delta = 0;
       }
       else
         all_done = 0;
 
-      set_level(i, new_level);
+      set_level_fp_8_8(i, channels[i].level >> 8);
     }
   }
 
@@ -149,42 +216,10 @@ ISR(TIMER1_COMPC_vect)
     fade_timer_disable();
 }
 
-static int split_set_topic(const char* topic, int* device, char** name)
-{
-  char* p = strchr(topic, '/');
-  if(p == NULL)
-  {
-    PRINTF("Myha: no /\n");
-    return -1;
-  }
-
-  ++p;
-  *device = 0;
-  while(*p >= '0' && *p <= '9')
-  {
-    *device = *device * 10 + *p - '0';
-    ++p;
-  }
-
-  if(*p != '/')
-  {
-    PRINTF("Myha: no /\n");
-    return -1;
-  }
-
-  *name = ++p;
-  
-  return 0;
-}
-
 static int snprintf_node_topic_P(char* topic, size_t size, const char* format, ...)
 {
   va_list ap;
-  int len = snprintf_P(topic, size, PSTR("%02x%02x%02x%02x%02x%02x%02x%02x/"), 
-                       linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1],
-                       linkaddr_node_addr.u8[2], linkaddr_node_addr.u8[3],
-                       linkaddr_node_addr.u8[4], linkaddr_node_addr.u8[5],
-                       linkaddr_node_addr.u8[6], linkaddr_node_addr.u8[7]);
+  int len = snprintf_P(topic, size, PSTR("%s/"), myha_get_node_id());
 
   va_start(ap, format);
   len += vsnprintf_P(topic + len, size - len, format, ap);
@@ -215,6 +250,146 @@ static void fade_to_level(int channel, int level)
   calc_fade(channel);
   if(channels[channel].delta != 0)
     fade_timer_enable();
+}
+
+static void process_local_event(int device, const char* topic, const char* message)
+{
+  static uint8_t level[NUM_DIMMER_CHANNELS] = { 32, 32, 32, 32, 32, 32 };
+  static uint8_t state = 0xff;
+  int max = device;
+
+  if(device == 0)
+    max = NUM_DIMMER_CHANNELS;
+  else
+    --device;
+
+  PRINTF("Myha: dev: %u, name: %s\n", device, topic);
+  if(strcmp(topic, "set/level") == 0)
+  {
+    uint8_t new_level = atoi(message);
+
+    // new_level *= 2.5
+    new_level = new_level + new_level + (new_level >> 1);
+    if(new_level >= 250)
+      new_level = 255;
+
+    fade_timer_disable();
+    for(; device < max; ++device)
+    {
+      level[device] = new_level;
+      if(level[device] > 0)
+        state |= BIT(device);
+      channels[device].target = new_level;
+      calc_fade(device);
+    }
+    fade_timer_enable();
+  }
+  else if(strcmp(topic, "set/state") == 0)
+  {
+    if(strcmp(message, "on") == 0)
+    {
+      for(; device < max; ++device)
+        state |= BIT(device);
+    }
+    else if(strcmp(message, "off") == 0)
+    {
+      for(; device < max; ++device)
+        state &= ~BIT(device);
+    }
+    else if(strcmp(message, "toggle") == 0)
+    {
+      for(; device < max; ++device)
+        state ^= BIT(device);
+    }
+
+    fade_timer_disable();
+    for(device = 0; device < NUM_DIMMER_CHANNELS; ++device)
+    {
+      channels[device].target = (state & BIT(device)) ? level[device] : 0;
+      calc_fade(device);
+    }
+    fade_timer_enable();
+  }
+  else if(strcmp(topic, "set/btnhold") == 0)
+  {
+    static uint8_t holddir = 0;
+
+    if(strcmp(message, "0") == 0)
+    {
+      fade_timer_disable();
+      for(; device < max; ++device)
+      {
+        channels[device].target = channels[device].level >> 16;
+        channels[device].delta = 0;
+        level[device] = channels[device].target;
+        if(level[device] > 0)
+          state |= BIT(device);
+      }
+      fade_timer_enable();
+    }
+    else
+    {
+      uint8_t dir = holddir & BIT(device);
+      if(device == 0 && max == NUM_DIMMER_CHANNELS)
+      {
+        holddir ^= BIT(7);
+        dir = holddir & BIT(7);
+      }
+      else
+        holddir ^= BIT(device);
+
+      fade_timer_disable();
+      if(dir)
+      {
+        for(; device < max; ++device)
+        {
+          channels[device].target = 255;
+          channels[device].delta = MANUAL_FADE_DELTA;
+        }
+      }
+      else
+      {
+        for(; device < max; ++device)
+        {
+          channels[device].target = 0;
+          channels[device].delta = -MANUAL_FADE_DELTA;
+        }
+      }
+      fade_timer_enable();
+    }
+  }
+}
+
+static void process_event(const char* topic, const char* message)
+{
+  const char* p = strchr(topic, '/');
+  if(p - topic == 16 && strncmp(topic, myha_get_node_id(), 16) == 0)
+  {
+    int device = 0;
+
+    PRINTF("got local event\n");
+
+    ++p;
+    while(*p >= '0' && *p <= '9')
+    {
+      device = device * 10 + *p - '0';
+      ++p;
+    }
+    if(*p == '/')
+      process_local_event(device, p + 1, message);
+    return;
+  }
+
+
+  if(strcmp_P(topic, PSTR("0004a30b00195f35/1/press")) == 0)
+  {
+    if(strcmp_P(message, PSTR("1")) == 0)
+      process_local_event(0, "set/state", "toggle");
+  }
+  else if(strcmp_P(topic, PSTR("0004a30b00195f35/1/hold")) == 0)
+  {
+    process_local_event(0, "set/btnhold", message);
+  }
 }
 
 static void hardware_init()
@@ -272,6 +447,8 @@ PROCESS_THREAD(led_dimmer_6ch_process, ev, data)
 
   PROCESS_BEGIN();
     
+  connect_info.client_id = myha_get_node_id();
+
   PRINTF("Myha started\n");
 
   if(ev == PROCESS_EVENT_INIT)
@@ -310,6 +487,14 @@ PROCESS_THREAD(led_dimmer_6ch_process, ev, data)
         mqtt_publish(topic, "percent", 0, 0);
         PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
 
+        sprintf_P(topic, PSTR("0004a30b00195f35/1/press"));
+        mqtt_subscribe(topic);
+        PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
+
+        sprintf_P(topic, PSTR("0004a30b00195f35/1/hold"));
+        mqtt_subscribe(topic);
+        PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
+
         snprintf_node_topic_P(topic, sizeof(topic), PSTR("+/set/+"));
         PRINTF("Myha: subscribing: %s...\n", topic);
         mqtt_subscribe(topic);
@@ -322,33 +507,11 @@ PROCESS_THREAD(led_dimmer_6ch_process, ev, data)
       }
       else if(mqtt_event_is_publish(data))
       {
-        int device;
-        char* name;
         const char* topic = mqtt_event_get_topic(data);
         const char* message = mqtt_event_get_data(data);
 
         PRINTF("Myha: got publish: %s = %s\n", topic, message);
-        if(split_set_topic(topic, &device, &name) == 0)
-        {
-          PRINTF("Myha: dev: %u, name: %s\n", device, name);
-          if(strcmp(name, "set/level") == 0)
-          {
-            int level = atoi(message) << 1;
-            if(level >= 200)
-              level = 255;
-
-            if(device == 0)
-            {
-              int i;
-              for(i = 0; i < NUM_DIMMER_CHANNELS; ++i)
-                fade_to_level(i, level);
-            }
-            else if(device >= 1 && device <= 6)
-              fade_to_level(device - 1, level);
-          }
-        }
-        else
-          PRINTF("Myha: split failed\n");
+        process_event(topic, message);
       }
     }
   }
