@@ -71,15 +71,19 @@ uint8_t profile[64] PROGMEM =
   189, 197, 206, 214, 224, 233, 243, 254
 };
 
-typedef struct dimmer_channel
+typedef struct fade_state
 {
-  uint32_t level;
+  uint32_t current;
   int32_t  delta;
   uint8_t  target;
 
-} dimmer_channel_t;
+} fade_state_t;
 
-static dimmer_channel_t channels[NUM_DIMMER_CHANNELS];
+static fade_state_t channel_fade_state[NUM_DIMMER_CHANNELS];
+static uint8_t channel_on_state;
+static uint8_t channel_direction_state;
+static uint8_t channel_level[NUM_DIMMER_CHANNELS];
+
 
 // multiply a 16bit integer by an 8bit integer, producing a 24bit result
 static inline uint32_t mul_16_8(uint16_t a, uint8_t b)
@@ -213,23 +217,23 @@ ISR(TIMER1_COMPC_vect)
 
   for(i = 0; i < NUM_DIMMER_CHANNELS; ++i)
   {
-    if(channels[i].delta != 0)
+    if(channel_fade_state[i].delta != 0)
     {
       uint8_t new_level;
 
-      channels[i].level += channels[i].delta;
-      new_level = channels[i].level >> 16;
+      channel_fade_state[i].current += channel_fade_state[i].delta;
+      new_level = channel_fade_state[i].current >> 16;
 
-      if((channels[i].delta > 0 && new_level >= channels[i].target) ||
-         (channels[i].delta < 0 && new_level <= channels[i].target))
+      if((channel_fade_state[i].delta > 0 && new_level >= channel_fade_state[i].target) ||
+         (channel_fade_state[i].delta < 0 && new_level <= channel_fade_state[i].target))
       {
-        channels[i].level = (uint32_t)channels[i].target << 16;
-        channels[i].delta = 0;
+        channel_fade_state[i].current = (uint32_t)channel_fade_state[i].target << 16;
+        channel_fade_state[i].delta = 0;
       }
       else
         all_done = 0;
 
-      set_level_fp_8_8(i, channels[i].level >> 8);
+      set_level_fp_8_8(i, channel_fade_state[i].current >> 8);
     }
   }
 
@@ -254,29 +258,125 @@ static void calc_fade(int channel)
   const long update_time = FADE_TIMER_TICKS_PER_SECOND / 2;
   long distance;
 
-  distance = channels[channel].target - (channels[channel].level >> 16);
+  distance = channel_fade_state[channel].target - (channel_fade_state[channel].current >> 16);
   if(distance < 0)
   {
     distance = 0 - distance;
-    channels[channel].delta = (distance << 16) / update_time;
-    channels[channel].delta = 0 - channels[channel].delta;
+    channel_fade_state[channel].delta = (distance << 16) / update_time;
+    channel_fade_state[channel].delta = 0 - channel_fade_state[channel].delta;
   }
   else
-    channels[channel].delta = (distance << 16) / update_time;
+    channel_fade_state[channel].delta = (distance << 16) / update_time;
 }
 
 static void fade_to_level(int channel, int level)
 {
-  channels[channel].target = level;
+  channel_fade_state[channel].target = level;
   calc_fade(channel);
-  if(channels[channel].delta != 0)
+  if(channel_fade_state[channel].delta != 0)
     fade_timer_enable();
+}
+
+static void process_event_set_level(int device, int max, const char* message)
+{
+  uint8_t new_level = atoi(message);
+
+  // scale 0->100 to 0->255
+  new_level = new_level + new_level + (new_level >> 1);
+  if(new_level >= 250)
+    new_level = 255;
+
+  fade_timer_disable();
+  for(; device < max; ++device)
+  {
+    channel_level[device] = new_level;
+    if(channel_level[device] > 0)
+      channel_on_state |= BIT(device);
+    channel_fade_state[device].target = new_level;
+    calc_fade(device);
+  }
+  fade_timer_enable();
+}
+
+static void process_event_set_state(int device, int max, const char* message)
+{
+  if(strcmp_P(message, PSTR("on")) == 0)
+  {
+    for(; device < max; ++device)
+      channel_on_state |= BIT(device);
+  }
+  else if(strcmp_P(message, PSTR("off")) == 0)
+  {
+    for(; device < max; ++device)
+      channel_on_state &= ~BIT(device);
+  }
+  else if(strcmp_P(message, PSTR("toggle")) == 0)
+  {
+    for(; device < max; ++device)
+      channel_on_state ^= BIT(device);
+  }
+
+  fade_timer_disable();
+  for(device = 0; device < NUM_DIMMER_CHANNELS; ++device)
+  {
+    channel_fade_state[device].target = (channel_on_state & BIT(device)) ? channel_level[device] : 0;
+    calc_fade(device);
+  }
+  fade_timer_enable();
+}
+
+static void process_event_set_btnhold(int device, int max, const char* message)
+{
+  if(strcmp_P(message, PSTR("0")) == 0)
+  {
+    fade_timer_disable();
+    for(; device < max; ++device)
+    {
+      channel_fade_state[device].target = channel_fade_state[device].current >> 16;
+      channel_fade_state[device].delta = 0;
+      channel_level[device] = channel_fade_state[device].target;
+      if(channel_level[device] > 0)
+        channel_on_state |= BIT(device);
+    }
+    fade_timer_enable();
+  }
+  else
+  {
+    uint8_t dir;
+    if(device == 0 && max == NUM_DIMMER_CHANNELS)
+    {
+      channel_direction_state ^= BIT(7);
+      dir = channel_direction_state & BIT(7);
+    }
+    else
+    {
+      channel_direction_state ^= BIT(device);
+      dir = channel_direction_state & BIT(device);
+    }
+
+    fade_timer_disable();
+    if(dir)
+    {
+      for(; device < max; ++device)
+      {
+        channel_fade_state[device].target = 255;
+        channel_fade_state[device].delta = MANUAL_FADE_DELTA;
+      }
+    }
+    else
+    {
+      for(; device < max; ++device)
+      {
+        channel_fade_state[device].target = 0;
+        channel_fade_state[device].delta = -MANUAL_FADE_DELTA;
+      }
+    }
+    fade_timer_enable();
+  }
 }
 
 static void process_local_event(int device, const char* topic, const char* message)
 {
-  static uint8_t level[NUM_DIMMER_CHANNELS] = { 32, 32, 32, 32, 32, 32 };
-  static uint8_t state = 0xff;
   int max = device;
 
   if(device == 0)
@@ -285,100 +385,22 @@ static void process_local_event(int device, const char* topic, const char* messa
     --device;
 
   PRINTF("Myha: dev: %u, name: %s\n", device, topic);
-  if(strcmp(topic, "set/level") == 0)
-  {
-    uint8_t new_level = atoi(message);
+  if(strcmp_P(topic, PSTR("set/level")) == 0)
+    return process_event_set_level(device, max, message);
+  if(strcmp_P(topic, PSTR("set/state")) == 0)
+    return process_event_set_state(device, max, message);
+  if(strcmp_P(topic, PSTR("set/btnhold")) == 0)
+    return process_event_set_btnhold(device, max, message);
 
-    // new_level *= 2.5
-    new_level = new_level + new_level + (new_level >> 1);
-    if(new_level >= 250)
-      new_level = 255;
+  // set/name
+  // set/location
+  // set/profile
+  // set/fade_rate
+  // set/scene
+  // set/scene/x/level
 
-    fade_timer_disable();
-    for(; device < max; ++device)
-    {
-      level[device] = new_level;
-      if(level[device] > 0)
-        state |= BIT(device);
-      channels[device].target = new_level;
-      calc_fade(device);
-    }
-    fade_timer_enable();
-  }
-  else if(strcmp(topic, "set/state") == 0)
-  {
-    if(strcmp(message, "on") == 0)
-    {
-      for(; device < max; ++device)
-        state |= BIT(device);
-    }
-    else if(strcmp(message, "off") == 0)
-    {
-      for(; device < max; ++device)
-        state &= ~BIT(device);
-    }
-    else if(strcmp(message, "toggle") == 0)
-    {
-      for(; device < max; ++device)
-        state ^= BIT(device);
-    }
-
-    fade_timer_disable();
-    for(device = 0; device < NUM_DIMMER_CHANNELS; ++device)
-    {
-      channels[device].target = (state & BIT(device)) ? level[device] : 0;
-      calc_fade(device);
-    }
-    fade_timer_enable();
-  }
-  else if(strcmp(topic, "set/btnhold") == 0)
-  {
-    static uint8_t holddir = 0;
-
-    if(strcmp(message, "0") == 0)
-    {
-      fade_timer_disable();
-      for(; device < max; ++device)
-      {
-        channels[device].target = channels[device].level >> 16;
-        channels[device].delta = 0;
-        level[device] = channels[device].target;
-        if(level[device] > 0)
-          state |= BIT(device);
-      }
-      fade_timer_enable();
-    }
-    else
-    {
-      uint8_t dir = holddir & BIT(device);
-      if(device == 0 && max == NUM_DIMMER_CHANNELS)
-      {
-        holddir ^= BIT(7);
-        dir = holddir & BIT(7);
-      }
-      else
-        holddir ^= BIT(device);
-
-      fade_timer_disable();
-      if(dir)
-      {
-        for(; device < max; ++device)
-        {
-          channels[device].target = 255;
-          channels[device].delta = MANUAL_FADE_DELTA;
-        }
-      }
-      else
-      {
-        for(; device < max; ++device)
-        {
-          channels[device].target = 0;
-          channels[device].delta = -MANUAL_FADE_DELTA;
-        }
-      }
-      fade_timer_enable();
-    }
-  }
+  // set/config/probe
+  // set/control/probe
 }
 
 static void process_event(const char* topic, const char* message)
@@ -387,8 +409,6 @@ static void process_event(const char* topic, const char* message)
   if(p - topic == 16 && strncmp(topic, myha_get_node_id(), 16) == 0)
   {
     int device = 0;
-
-    PRINTF("got local event\n");
 
     ++p;
     while(*p >= '0' && *p <= '9')
