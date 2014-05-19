@@ -30,23 +30,24 @@
 
 #include "mqtt-service.h"
 #include "myha.h"
+#include "colour-space.h"
 
 #define FADE_TIMER_TICKS_PER_SECOND  1000
 #define NUM_DIMMER_CHANNELS 6
 #define MANUAL_FADE_DELTA 10000
 #include "led-dimmer-6ch-eeprom.h"
 
-#define CHAN1_PIN (B, 7)
-#define CHAN2_PIN (G, 5)
-#define CHAN3_PIN (B, 5)
-#define CHAN4_PIN (B, 6)
+#define CHAN1_PIN (B, 5)
+#define CHAN2_PIN (B, 7)
+#define CHAN3_PIN (B, 6)
+#define CHAN4_PIN (G, 5)
 #define CHAN5_PIN (E, 3)
 #define CHAN6_PIN (E, 4)
 
-#define CHAN1_PWM (0, A)
-#define CHAN2_PWM (0, B)
-#define CHAN3_PWM (1, A)
-#define CHAN4_PWM (1, B)
+#define CHAN1_PWM (1, A)
+#define CHAN2_PWM (0, A)
+#define CHAN3_PWM (1, B)
+#define CHAN4_PWM (0, B)
 #define CHAN5_PWM (3, A)
 #define CHAN6_PWM (3, B)
 
@@ -288,6 +289,70 @@ static void process_event_set_level(int device, int max, const char* message)
   }
   fade_timer_enable();
 }
+static void process_event_set_hue(int device, int max, const char* message)
+{
+  uint8_t i, h, s, v;
+  rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
+  if(message[0] == '+')
+    h += atoi(message + 1);
+  else if(message[1] == '-')
+    h -= atoi(message + 1);
+  else
+    h = atoi(message);
+  hsv2rgb(h, s, v, &channel_level[0], &channel_level[1], &channel_level[2]);
+
+  fade_timer_disable();
+  for(i = 0; i < 3; ++i)
+  {
+    channel_fade_state[i].target = channel_level[i];
+    calc_fade(i);
+  }
+  fade_timer_enable();
+}
+
+static void process_event_set_saturation(int device, int max, const char* message)
+{
+  uint8_t i, h, s, v;
+  rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
+  if(message[0] == '+')
+    s += atoi(message + 1);
+  else if(message[0] == '-')
+    s -= atoi(message + 1);
+  else
+    s = atoi(message);
+  s = atoi(message);
+  hsv2rgb(h, s, v, &channel_level[0], &channel_level[1], &channel_level[2]);
+
+  fade_timer_disable();
+  for(i = 0; i < 3; ++i)
+  {
+    channel_fade_state[i].target = channel_level[i];
+    calc_fade(i);
+  }
+  fade_timer_enable();
+}
+
+static void process_event_set_brightness(int device, int max, const char* message)
+{
+  uint8_t i, h, s, v;
+  rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
+  if(message[0] == '+')
+    v += atoi(message + 1);
+  else if(message[0] == '-')
+    v -= atoi(message + 1);
+  else
+    v = atoi(message);
+  v = atoi(message);
+  hsv2rgb(h, s, v, &channel_level[0], &channel_level[1], &channel_level[2]);
+
+  fade_timer_disable();
+  for(i = 0; i < 3; ++i)
+  {
+    channel_fade_state[i].target = channel_level[i];
+    calc_fade(i);
+  }
+  fade_timer_enable();
+}
 
 static void process_event_set_state(int device, int max, const char* message)
 {
@@ -410,6 +475,12 @@ static void process_local_event(int device, const char* topic, const char* messa
     PRINTF("is set\n");
     if(strcmp_P(topic, PSTR("level")) == 0)
       return process_event_set_level(device, max, message);
+    if(strcmp_P(topic, PSTR("hue")) == 0)
+      return process_event_set_hue(device, max, message);
+    if(strcmp_P(topic, PSTR("saturation")) == 0)
+      return process_event_set_saturation(device, max, message);
+    if(strcmp_P(topic, PSTR("brightness")) == 0)
+      return process_event_set_brightness(device, max, message);
     if(strcmp_P(topic, PSTR("state")) == 0)
       return process_event_set_state(device, max, message);
     if(strcmp_P(topic, PSTR("btnhold")) == 0)
