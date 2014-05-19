@@ -31,6 +31,11 @@
 #include "mqtt-service.h"
 #include "myha.h"
 
+#define FADE_TIMER_TICKS_PER_SECOND  1000
+#define NUM_DIMMER_CHANNELS 6
+#define MANUAL_FADE_DELTA 10000
+#include "led-dimmer-6ch-eeprom.h"
+
 #define CHAN1_PIN (B, 7)
 #define CHAN2_PIN (G, 5)
 #define CHAN3_PIN (B, 5)
@@ -47,9 +52,6 @@
 
 #define PRINTF(format, args...) printf_P(PSTR(format), ##args)
 
-#define FADE_TIMER_TICKS_PER_SECOND  1000
-#define NUM_DIMMER_CHANNELS 6
-#define MANUAL_FADE_DELTA 10000
 
 PROCESS(led_dimmer_6ch_process, "LED Dimmer 6 Channel process");
 
@@ -59,17 +61,6 @@ PROCESS_NAME(myha_udp_client_process);
 AUTOSTART_PROCESSES(&myha_process);
 MYHA_AUTOSTART_PROCESSES(&myha_udp_client_process, &led_dimmer_6ch_process);
 
-uint8_t profile[64] PROGMEM = 
-{
-    0,   1,   2,   3,   4,   5,   6,   7,
-    9,  10,  11,  13,  14,  16,  18,  19,
-   21,  23,  25,  27,  29,  31,  33,  35,
-   38,  40,  43,  46,  48,  51,  54,  57,
-   60,  64,  67,  71,  75,  79,  83,  87,
-   91,  96, 100, 105, 110, 116, 121, 127,
-  133, 139, 145, 152, 159, 166, 173, 181,
-  189, 197, 206, 214, 224, 233, 243, 254
-};
 
 typedef struct fade_state
 {
@@ -80,9 +71,9 @@ typedef struct fade_state
 } fade_state_t;
 
 static fade_state_t channel_fade_state[NUM_DIMMER_CHANNELS];
-static uint8_t channel_on_state;
-static uint8_t channel_direction_state;
-static uint8_t channel_level[NUM_DIMMER_CHANNELS];
+static uint8_t channel_on_state = 0xFF;
+static uint8_t channel_direction_state = 0;
+static uint8_t channel_level[NUM_DIMMER_CHANNELS] = { 32, 32, 32, 32, 32, 32 };
 
 
 // multiply a 16bit integer by an 8bit integer, producing a 24bit result
@@ -115,9 +106,9 @@ uint16_t get_profiled_level(uint16_t x)
   x_f = x & 0xff;
 
   // lookup two points in the profile
-  p1 = pgm_read_byte(&profile[x_i]);
+  p1 = eeprom_read_byte(&eeprom.channel[0].profile[x_i]);
   if(x_i < 63)
-    p2 = pgm_read_byte(&profile[x_i + 1]);
+    p2 = eeprom_read_byte(&eeprom.channel[0].profile[x_i + 1]);
   else
     p2 = p1;
 
@@ -255,7 +246,7 @@ static int snprintf_node_topic_P(char* topic, size_t size, const char* format, .
 
 static void calc_fade(int channel)
 {
-  const long update_time = FADE_TIMER_TICKS_PER_SECOND / 2;
+  const long update_time = (FADE_TIMER_TICKS_PER_SECOND / 10) * eeprom_read_byte(&eeprom.channel[channel].fade_rate);
   long distance;
 
   distance = channel_fade_state[channel].target - (channel_fade_state[channel].current >> 16);
@@ -375,27 +366,63 @@ static void process_event_set_btnhold(int device, int max, const char* message)
   }
 }
 
+static void process_event_set_name(int device, int max, const char* message)
+{
+  int length = strlen(message);
+  if(length >= sizeof(eeprom.channel[0].name))
+    length = sizeof(eeprom.channel[0].name) - 1;
+
+  for(; device < max; ++device)
+    eeprom_write_block(message, &eeprom.channel[device].name, length);
+}
+
+static void process_event_set_location(int device, int max, const char* message)
+{
+  int length = strlen(message);
+  if(length >= sizeof(eeprom.channel[0].location))
+    length = sizeof(eeprom.channel[0].location) - 1;
+
+  for(; device < max; ++device)
+    eeprom_write_block(message, &eeprom.channel[device].location, length);
+}
+
+static void process_event_set_fade_rate(int device, int max, const char* message)
+{
+  uint8_t rate = atoi(message);
+  for(; device < max; ++device)
+    eeprom_write_byte(&eeprom.channel[device].fade_rate, rate);
+}
+
 static void process_local_event(int device, const char* topic, const char* message)
 {
-  int max = device;
-
-  if(device == 0)
-    max = NUM_DIMMER_CHANNELS;
-  else
-    --device;
-
   PRINTF("Myha: dev: %u, name: %s\n", device, topic);
-  if(strcmp_P(topic, PSTR("set/level")) == 0)
-    return process_event_set_level(device, max, message);
-  if(strcmp_P(topic, PSTR("set/state")) == 0)
-    return process_event_set_state(device, max, message);
-  if(strcmp_P(topic, PSTR("set/btnhold")) == 0)
-    return process_event_set_btnhold(device, max, message);
+  if(strncmp_P(topic, PSTR("set/"), 4) == 0)
+  {
+    int max = device;
 
-  // set/name
-  // set/location
+    if(device == 0)
+      max = NUM_DIMMER_CHANNELS;
+    else
+      --device;
+
+    topic += 4;
+
+    PRINTF("is set\n");
+    if(strcmp_P(topic, PSTR("level")) == 0)
+      return process_event_set_level(device, max, message);
+    if(strcmp_P(topic, PSTR("state")) == 0)
+      return process_event_set_state(device, max, message);
+    if(strcmp_P(topic, PSTR("btnhold")) == 0)
+      return process_event_set_btnhold(device, max, message);
+    if(strcmp_P(topic, PSTR("name")) == 0)
+      return process_event_set_name(device, max, message);
+    if(strcmp_P(topic, PSTR("location")) == 0)
+      return process_event_set_location(device, max, message);
+    if(strcmp_P(topic, PSTR("fade_rate")) == 0)
+      return process_event_set_fade_rate(device, max, message);
+  }
+
   // set/profile
-  // set/fade_rate
   // set/scene
   // set/scene/x/level
 
@@ -514,19 +541,18 @@ PROCESS_THREAD(led_dimmer_6ch_process, ev, data)
     {
       if(mqtt_event_is_connected(data))
       {
+        static int i;
+
         PRINTF("Myha: MQTT connected\n");
 
-        snprintf_node_topic_P(topic, sizeof(topic), PSTR("1/name"));
-        mqtt_publish(topic, "6 Channel LED Dimmer", 0, 0);
-        PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
-
-        snprintf_node_topic_P(topic, sizeof(topic), PSTR("1/control/level/name"));
-        mqtt_publish(topic, "Level", 0, 0);
-        PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
-
-        snprintf_node_topic_P(topic, sizeof(topic), PSTR("1/control/level/type"));
-        mqtt_publish(topic, "percent", 0, 0);
-        PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
+        for(i = 0; i < NUM_DIMMER_CHANNELS; ++i)
+        {
+          char name[32];
+          snprintf_node_topic_P(topic, sizeof(topic), PSTR("%u/name"), i);
+          eeprom_read_block(name, &eeprom.channel[i].name[0], sizeof(eeprom.channel[i].name));
+          mqtt_publish(topic, name, 0, 0);
+          PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
+        }
 
         sprintf_P(topic, PSTR("0004a30b00195f35/1/press"));
         mqtt_subscribe(topic);
