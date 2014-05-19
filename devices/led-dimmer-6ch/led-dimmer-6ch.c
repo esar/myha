@@ -63,6 +63,16 @@ AUTOSTART_PROCESSES(&myha_process);
 MYHA_AUTOSTART_PROCESSES(&myha_udp_client_process, &led_dimmer_6ch_process);
 
 
+typedef int (*topic_getter_t)(char* buffer, int buffer_size, int device);
+typedef void (*topic_setter_t)(int device, int max, const char* value);
+typedef struct topic_handler
+{
+  const char* topic;
+  topic_setter_t set;
+  topic_getter_t get;
+
+} topic_handler_t;
+
 typedef struct fade_state
 {
   uint32_t current;
@@ -71,11 +81,74 @@ typedef struct fade_state
 
 } fade_state_t;
 
+
+static void topic_set_level(int device, int max, const char* value);
+static int  topic_get_level(char* buffer, int buffer_size, int device);
+static void topic_set_state(int device, int max, const char* value);
+static int  topic_get_state(char* buffer, int buffer_size, int device);
+static void topic_set_hue(int device, int max, const char* value);
+static int  topic_get_hue(char* buffer, int buffer_size, int device);
+static void topic_set_saturation(int device, int max, const char* value);
+static int  topic_get_saturation(char* buffer, int buffer_size, int device);
+static void topic_set_brightness(int device, int max, const char* value);
+static int  topic_get_brightness(char* buffer, int buffer_size, int device);
+static void topic_set_name(int device, int max, const char* value);
+static int  topic_get_name(char* buffer, int buffer_size, int device);
+static void topic_set_location(int device, int max, const char* value);
+static int  topic_get_location(char* buffer, int buffer_size, int device);
+static void topic_set_fade_rate(int device, int max, const char* value);
+static int  topic_get_fade_rate(char* buffer, int buffer_size, int device);
+
+static const char topic_name_level[]      PROGMEM = "level";
+static const char topic_name_state[]      PROGMEM = "state";
+static const char topic_name_hue[]        PROGMEM = "hue";
+static const char topic_name_saturation[] PROGMEM = "saturation";
+static const char topic_name_brightness[] PROGMEM = "brightness";
+static const char topic_name_name[]       PROGMEM = "name";
+static const char topic_name_location[]   PROGMEM = "location";
+static const char topic_name_fade_rate[]  PROGMEM = "fade_rate";
+static topic_handler_t topic_handlers[] PROGMEM = 
+{
+  { topic_name_level,      topic_set_level,      topic_get_level      },
+  { topic_name_state,      topic_set_state,      topic_get_state      },
+  { topic_name_hue,        topic_set_hue,        topic_get_hue        },
+  { topic_name_saturation, topic_set_saturation, topic_get_saturation },
+  { topic_name_brightness, topic_set_brightness, topic_get_brightness },
+  { topic_name_name,       topic_set_name,       topic_get_name       },
+  { topic_name_location,   topic_set_location,   topic_get_location   },
+  { topic_name_fade_rate,  topic_set_fade_rate,  topic_get_fade_rate  },
+  { NULL }
+};
+
+#define TOPIC_LEVEL       0
+#define TOPIC_STATE       1
+#define TOPIC_HUE         2
+#define TOPIC_SATURATION  3
+#define TOPIC_BRIGHTNESS  4
+#define TOPIC_NAME        5
+#define TOPIC_LOCATION    6
+#define TOPIC_FADE_RATE   7
+
+#define PUBLISH(channel, topic_index)  do { publish_mask |= BIT(channel); channel_publish_mask[channel] |= BIT(topic_index); } while(0)
+
 static fade_state_t channel_fade_state[NUM_DIMMER_CHANNELS];
 static uint8_t channel_on_state = 0xFF;
 static uint8_t channel_direction_state = 0;
 static uint8_t channel_level[NUM_DIMMER_CHANNELS] = { 32, 32, 32, 32, 32, 32 };
 
+static uint8_t publish_mask;
+static uint16_t channel_publish_mask[NUM_DIMMER_CHANNELS];
+
+// calculate log2 of a 16 bit number that is known to be a power of 2
+static uint8_t log2_p2_16(uint16_t x)
+{
+  uint16_t r;
+  r  =  (x & 0xAAAA) != 0;
+  r |= ((x & 0xCCCC) != 0) << 1;
+  r |= ((x & 0xF0F0) != 0) << 2;
+  r |= ((x & 0xFF00) != 0) << 3;
+  return r;
+}
 
 // multiply a 16bit integer by an 8bit integer, producing a 24bit result
 static inline uint32_t mul_16_8(uint16_t a, uint8_t b)
@@ -269,7 +342,34 @@ static void fade_to_level(int channel, int level)
     fade_timer_enable();
 }
 
-static void process_event_set_level(int device, int max, const char* message)
+static void store_level(uint8_t device, uint8_t level)
+{
+  if(level != channel_level[device])
+  {
+    channel_level[device] = level;
+    PUBLISH(device, TOPIC_LEVEL);
+
+    // TODO: if channel is part of an rgb set then publish
+    //       new hue, saturation and brightness
+    if(0)
+    {
+      PUBLISH(device, TOPIC_HUE);
+      PUBLISH(device, TOPIC_SATURATION);
+      PUBLISH(device, TOPIC_BRIGHTNESS);
+    }
+  }
+}
+
+static void store_state(uint8_t device, uint8_t state)
+{
+  if(((channel_on_state & BIT(device)) == 0) != (state == 0))
+  {
+    channel_on_state ^= BIT(device);
+    PUBLISH(device, TOPIC_STATE);
+  }
+}
+
+static void topic_set_level(int device, int max, const char* message)
 {
   uint8_t new_level = atoi(message);
 
@@ -281,17 +381,22 @@ static void process_event_set_level(int device, int max, const char* message)
   fade_timer_disable();
   for(; device < max; ++device)
   {
-    channel_level[device] = new_level;
-    if(channel_level[device] > 0)
-      channel_on_state |= BIT(device);
+    store_level(device, new_level);
+    store_state(device, new_level > 0);
     channel_fade_state[device].target = new_level;
     calc_fade(device);
   }
   fade_timer_enable();
 }
-static void process_event_set_hue(int device, int max, const char* message)
+
+static int topic_get_level(char* buffer, int buffer_size, int device)
 {
-  uint8_t i, h, s, v;
+  return snprintf(buffer, buffer_size, "%u", channel_level[device]);
+}
+
+static void topic_set_hue(int device, int max, const char* message)
+{
+  uint8_t i, h, s, v, r, g, b;
   rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
   if(message[0] == '+')
     h += atoi(message + 1);
@@ -299,7 +404,10 @@ static void process_event_set_hue(int device, int max, const char* message)
     h -= atoi(message + 1);
   else
     h = atoi(message);
-  hsv2rgb(h, s, v, &channel_level[0], &channel_level[1], &channel_level[2]);
+  hsv2rgb(h, s, v, &r, &g, &b);
+  store_level(0, r);
+  store_level(1, g);
+  store_level(2, b);
 
   fade_timer_disable();
   for(i = 0; i < 3; ++i)
@@ -310,9 +418,16 @@ static void process_event_set_hue(int device, int max, const char* message)
   fade_timer_enable();
 }
 
-static void process_event_set_saturation(int device, int max, const char* message)
+static int topic_get_hue(char* buffer, int buffer_size, int device)
 {
-  uint8_t i, h, s, v;
+  uint8_t h, s, v;
+  rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
+  return snprintf(buffer, buffer_size, "%u", h);
+}
+
+static void topic_set_saturation(int device, int max, const char* message)
+{
+  uint8_t i, h, s, v, r, g, b;
   rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
   if(message[0] == '+')
     s += atoi(message + 1);
@@ -321,7 +436,10 @@ static void process_event_set_saturation(int device, int max, const char* messag
   else
     s = atoi(message);
   s = atoi(message);
-  hsv2rgb(h, s, v, &channel_level[0], &channel_level[1], &channel_level[2]);
+  hsv2rgb(h, s, v, &r, &g, &b);
+  store_level(0, r);
+  store_level(1, g);
+  store_level(2, b);
 
   fade_timer_disable();
   for(i = 0; i < 3; ++i)
@@ -332,9 +450,16 @@ static void process_event_set_saturation(int device, int max, const char* messag
   fade_timer_enable();
 }
 
-static void process_event_set_brightness(int device, int max, const char* message)
+static int topic_get_saturation(char* buffer, int buffer_size, int device)
 {
-  uint8_t i, h, s, v;
+  uint8_t h, s, v;
+  rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
+  return snprintf(buffer, buffer_size, "%u", s);
+}
+
+static void topic_set_brightness(int device, int max, const char* message)
+{
+  uint8_t i, h, s, v, r, g, b;
   rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
   if(message[0] == '+')
     v += atoi(message + 1);
@@ -343,7 +468,10 @@ static void process_event_set_brightness(int device, int max, const char* messag
   else
     v = atoi(message);
   v = atoi(message);
-  hsv2rgb(h, s, v, &channel_level[0], &channel_level[1], &channel_level[2]);
+  hsv2rgb(h, s, v, &r, &g, &b);
+  store_level(0, r);
+  store_level(0, g);
+  store_level(0, b);
 
   fade_timer_disable();
   for(i = 0; i < 3; ++i)
@@ -354,22 +482,29 @@ static void process_event_set_brightness(int device, int max, const char* messag
   fade_timer_enable();
 }
 
-static void process_event_set_state(int device, int max, const char* message)
+static int topic_get_brightness(char* buffer, int buffer_size, int device)
+{
+  uint8_t h, s, v;
+  rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
+  return snprintf(buffer, buffer_size, "%u", v);
+}
+
+static void topic_set_state(int device, int max, const char* message)
 {
   if(strcmp_P(message, PSTR("on")) == 0)
   {
     for(; device < max; ++device)
-      channel_on_state |= BIT(device);
+      store_state(device, 1);
   }
   else if(strcmp_P(message, PSTR("off")) == 0)
   {
     for(; device < max; ++device)
-      channel_on_state &= ~BIT(device);
+      store_state(device, 0);
   }
   else if(strcmp_P(message, PSTR("toggle")) == 0)
   {
     for(; device < max; ++device)
-      channel_on_state ^= BIT(device);
+      store_state(device, !(channel_on_state & BIT(device)));
   }
 
   fade_timer_disable();
@@ -381,7 +516,15 @@ static void process_event_set_state(int device, int max, const char* message)
   fade_timer_enable();
 }
 
-static void process_event_set_btnhold(int device, int max, const char* message)
+static int topic_get_state(char* buffer, int buffer_size, int device)
+{
+  if(channel_on_state & BIT(device))
+    return snprintf_P(buffer, buffer_size, PSTR("on"));
+  else
+    return snprintf_P(buffer, buffer_size, PSTR("off"));
+}
+
+static void topic_set_btnhold(int device, int max, const char* message)
 {
   if(strcmp_P(message, PSTR("0")) == 0)
   {
@@ -431,31 +574,66 @@ static void process_event_set_btnhold(int device, int max, const char* message)
   }
 }
 
-static void process_event_set_name(int device, int max, const char* message)
+static void topic_set_name(int device, int max, const char* message)
 {
   int length = strlen(message);
   if(length >= sizeof(eeprom.channel[0].name))
     length = sizeof(eeprom.channel[0].name) - 1;
 
   for(; device < max; ++device)
+  {
     eeprom_write_block(message, &eeprom.channel[device].name, length);
+    eeprom_write_byte((uint8_t*)&eeprom.channel[device].name[length], 0);
+    PUBLISH(device, TOPIC_NAME);
+  }
 }
 
-static void process_event_set_location(int device, int max, const char* message)
+static int topic_get_name(char* buffer, int buffer_size, int device)
+{
+  int len = sizeof(eeprom.channel[device].name);
+  if(len >= buffer_size)
+    len = buffer_size - 1;
+  eeprom_read_block(buffer, eeprom.channel[device].name, len);
+  len = strlen(buffer);
+  buffer[len] = '\0';
+  return len; 
+}
+
+static void topic_set_location(int device, int max, const char* message)
 {
   int length = strlen(message);
   if(length >= sizeof(eeprom.channel[0].location))
     length = sizeof(eeprom.channel[0].location) - 1;
 
   for(; device < max; ++device)
+  {
     eeprom_write_block(message, &eeprom.channel[device].location, length);
+    eeprom_write_byte((uint8_t*)&eeprom.channel[device].location[length], 0);
+    PUBLISH(device, TOPIC_LOCATION);
+  }
 }
 
-static void process_event_set_fade_rate(int device, int max, const char* message)
+static int topic_get_location(char* buffer, int buffer_size, int device)
+{
+  int len = sizeof(eeprom.channel[device].location);
+  if(len >= buffer_size)
+    len = buffer_size - 1;
+  eeprom_read_block(buffer, eeprom.channel[device].location, len);
+  len = strlen(buffer);
+  buffer[len] = '\0';
+  return len; 
+}
+
+static void topic_set_fade_rate(int device, int max, const char* message)
 {
   uint8_t rate = atoi(message);
   for(; device < max; ++device)
     eeprom_write_byte(&eeprom.channel[device].fade_rate, rate);
+}
+
+static int topic_get_fade_rate(char* buffer, int buffer_size, int device)
+{
+  return snprintf(buffer, buffer_size, "%u", eeprom_read_byte(&eeprom.channel[device].fade_rate));
 }
 
 static void process_local_event(int device, const char* topic, const char* message)
@@ -463,6 +641,7 @@ static void process_local_event(int device, const char* topic, const char* messa
   PRINTF("Myha: dev: %u, name: %s\n", device, topic);
   if(strncmp_P(topic, PSTR("set/"), 4) == 0)
   {
+    int i;
     int max = device;
 
     if(device == 0)
@@ -472,25 +651,20 @@ static void process_local_event(int device, const char* topic, const char* messa
 
     topic += 4;
 
-    PRINTF("is set\n");
-    if(strcmp_P(topic, PSTR("level")) == 0)
-      return process_event_set_level(device, max, message);
-    if(strcmp_P(topic, PSTR("hue")) == 0)
-      return process_event_set_hue(device, max, message);
-    if(strcmp_P(topic, PSTR("saturation")) == 0)
-      return process_event_set_saturation(device, max, message);
-    if(strcmp_P(topic, PSTR("brightness")) == 0)
-      return process_event_set_brightness(device, max, message);
-    if(strcmp_P(topic, PSTR("state")) == 0)
-      return process_event_set_state(device, max, message);
-    if(strcmp_P(topic, PSTR("btnhold")) == 0)
-      return process_event_set_btnhold(device, max, message);
-    if(strcmp_P(topic, PSTR("name")) == 0)
-      return process_event_set_name(device, max, message);
-    if(strcmp_P(topic, PSTR("location")) == 0)
-      return process_event_set_location(device, max, message);
-    if(strcmp_P(topic, PSTR("fade_rate")) == 0)
-      return process_event_set_fade_rate(device, max, message);
+    for(i = 0; i < sizeof(topic_handlers) / sizeof(*topic_handlers); ++i)
+    {
+      if(strcmp_P(topic, (PGM_P)pgm_read_word(&topic_handlers[i].topic)) == 0)
+      {
+        PRINTF("setter match\n");
+        topic_setter_t setter = (topic_setter_t)pgm_read_word(&topic_handlers[i].set);
+        if(setter != NULL)
+        {
+          PRINTF("calling setter\n");
+          setter(device, max, message);
+        }
+        break;
+      }
+    }
   }
 
   // set/profile
@@ -499,6 +673,24 @@ static void process_local_event(int device, const char* topic, const char* messa
 
   // set/config/probe
   // set/control/probe
+}
+
+static int process_publish(char* topic_buffer, int topic_buffer_size,
+                           char* message_buffer, int message_buffer_size,
+                           int channel, int topic_index)
+{
+  if(topic_index < sizeof(topic_handlers) / sizeof(*topic_handlers))
+  {
+    topic_getter_t getter = (topic_getter_t)pgm_read_word(&topic_handlers[topic_index].get);
+    if(getter != NULL)
+    {
+      snprintf_P(topic_buffer, topic_buffer_size, PSTR("%s/%u/%S"),
+                 myha_get_node_id(), channel, pgm_read_word(&topic_handlers[topic_index].topic));
+      return getter(message_buffer, message_buffer_size, channel);
+    }
+  }
+
+  return 0;
 }
 
 static void process_event(const char* topic, const char* message)
@@ -650,6 +842,37 @@ PROCESS_THREAD(led_dimmer_6ch_process, ev, data)
 
         PRINTF("Myha: got publish: %s = %s\n", topic, message);
         process_event(topic, message);
+      }
+
+      if(publish_mask != 0 && mqtt_ready())
+      {
+        int channel, i;
+        int published_one = 0;
+
+        for(channel = 0; channel < NUM_DIMMER_CHANNELS && !published_one; ++channel)
+        {
+          if(publish_mask & BIT(channel))
+          {
+            for(i = 0; i < sizeof(topic_handlers) / sizeof(*topic_handlers) && !published_one; ++i)
+            {
+              if(channel_publish_mask[channel] & BIT(i))
+              {
+                char message[32];
+                if(process_publish(topic, sizeof(topic), message, sizeof(message), channel, i))
+                {
+                  PRINTF("publishing %s = %s\n", topic, message);
+                  mqtt_publish(topic, message, 0, 0);
+                  published_one = 1;
+                }
+
+                channel_publish_mask[channel] &= ~BIT(i);
+              }
+            }
+
+            if(channel_publish_mask == 0)
+              publish_mask &= ~BIT(channel);
+          }
+        }
       }
     }
   }
