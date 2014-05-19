@@ -168,6 +168,16 @@ static inline uint32_t mul_16_8(uint16_t a, uint8_t b)
         return product;
 }
 
+uint8_t relative_atoi(uint8_t current_value, const char* new_value)
+{
+  if(new_value[0] == '+')
+    return current_value + atoi(new_value + 1);
+  else if(new_value[0] == '-')
+    return current_value - atoi(new_value + 1);
+  else
+    return atoi(new_value);
+}
+
 uint16_t get_profiled_level(uint16_t x)
 {
   uint8_t x_i, x_f, p1, p2;
@@ -371,16 +381,10 @@ static void store_state(uint8_t device, uint8_t state)
 
 static void topic_set_level(int device, int max, const char* message)
 {
-  uint8_t new_level = atoi(message);
-
-  // scale 0->100 to 0->255
-  new_level = new_level + new_level + (new_level >> 1);
-  if(new_level >= 250)
-    new_level = 255;
-
   fade_timer_disable();
   for(; device < max; ++device)
   {
+    uint8_t new_level = relative_atoi(channel_level[device], message);
     store_level(device, new_level);
     store_state(device, new_level > 0);
     channel_fade_state[device].target = new_level;
@@ -397,14 +401,11 @@ static int topic_get_level(char* buffer, int buffer_size, int device)
 static void topic_set_hue(int device, int max, const char* message)
 {
   uint8_t i, h, s, v, r, g, b;
+
   rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
-  if(message[0] == '+')
-    h += atoi(message + 1);
-  else if(message[1] == '-')
-    h -= atoi(message + 1);
-  else
-    h = atoi(message);
+  h = relative_atoi(h, message);
   hsv2rgb(h, s, v, &r, &g, &b);
+
   store_level(0, r);
   store_level(1, g);
   store_level(2, b);
@@ -428,15 +429,11 @@ static int topic_get_hue(char* buffer, int buffer_size, int device)
 static void topic_set_saturation(int device, int max, const char* message)
 {
   uint8_t i, h, s, v, r, g, b;
+
   rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
-  if(message[0] == '+')
-    s += atoi(message + 1);
-  else if(message[0] == '-')
-    s -= atoi(message + 1);
-  else
-    s = atoi(message);
-  s = atoi(message);
+  s = relative_atoi(s, message);
   hsv2rgb(h, s, v, &r, &g, &b);
+
   store_level(0, r);
   store_level(1, g);
   store_level(2, b);
@@ -460,15 +457,11 @@ static int topic_get_saturation(char* buffer, int buffer_size, int device)
 static void topic_set_brightness(int device, int max, const char* message)
 {
   uint8_t i, h, s, v, r, g, b;
+
   rgb2hsv(channel_level[0], channel_level[1], channel_level[2], &h, &s, &v);
-  if(message[0] == '+')
-    v += atoi(message + 1);
-  else if(message[0] == '-')
-    v -= atoi(message + 1);
-  else
-    v = atoi(message);
-  v = atoi(message);
+  v = relative_atoi(v, message);
   hsv2rgb(h, s, v, &r, &g, &b);
+
   store_level(0, r);
   store_level(1, g);
   store_level(2, b);
@@ -626,9 +619,11 @@ static int topic_get_location(char* buffer, int buffer_size, int device)
 
 static void topic_set_fade_rate(int device, int max, const char* message)
 {
-  uint8_t rate = atoi(message);
   for(; device < max; ++device)
+  {
+    uint8_t rate = relative_atoi(eeprom_read_byte(&eeprom.channel[device].fade_rate), message);
     eeprom_write_byte(&eeprom.channel[device].fade_rate, rate);
+  }
 }
 
 static int topic_get_fade_rate(char* buffer, int buffer_size, int device)
