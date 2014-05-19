@@ -470,8 +470,8 @@ static void topic_set_brightness(int device, int max, const char* message)
   v = atoi(message);
   hsv2rgb(h, s, v, &r, &g, &b);
   store_level(0, r);
-  store_level(0, g);
-  store_level(0, b);
+  store_level(1, g);
+  store_level(2, b);
 
   fade_timer_disable();
   for(i = 0; i < 3; ++i)
