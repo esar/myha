@@ -27,6 +27,7 @@
 #include "sys/clock.h"
 //#include "sys/rtimer.h"
 #include "sys/etimer.h"
+#include <avr/pgmspace.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,35 +56,31 @@ MYHA_AUTOSTART_PROCESSES(&myha_udp_client_process, &rako_bridge_process);
 
 static char* get_device_topic(char* buffer, int house, int room, int channel, char* name)
 {
-  sprintf(buffer, "node/%02x%02x%02x%02x%02x%02x%02x%02x/dev/%02x%02x%02x/%s",
-          linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1],
-          linkaddr_node_addr.u8[2], linkaddr_node_addr.u8[3],
-          linkaddr_node_addr.u8[4], linkaddr_node_addr.u8[5],
-          linkaddr_node_addr.u8[6], linkaddr_node_addr.u8[7],
-          house, room, channel, name);
+  sprintf_P(buffer, PSTR("%s/%02x%02x%01x/%s"), myha_get_node_id(),
+            house, room, channel, name);
   return buffer;
 }
 
 static int split_set_topic(const char* topic, int* house, int* room, int* channel, char** name)
 {
-  char* p = strstr(topic, "/dev/");
+  char* p = strchr(topic, '/');
   if(p == NULL)
   {
-    PRINTF("Myha: no /dev/\n");
+    PRINTF("Myha: no '/'\n");
     return -1;
   }
 
-  p += 5;
-  if(sscanf(p, "%2x%2x%2x", house, room, channel) != 3)
+  ++p;
+  if(sscanf(p, "%2x%2x%1x", house, room, channel) != 3)
   {
     PRINTF("Myha: scanf failed: %s\n", p);
     return -1;
   }
 
-  p += 6;
+  p += 5;
   if(*p != '/')
   {
-    PRINTF("Myha: no /\n");
+    PRINTF("Myha: no '/'\n");
     return -1;
   }
 
@@ -141,19 +138,11 @@ PROCESS_THREAD(rako_bridge_process, ev, data)
       {
         PRINTF("Myha: MQTT connected\n");
 
-        sprintf(topic, "node/%02x%02x%02x%02x%02x%02x%02x%02x/name",
-                linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1],
-                linkaddr_node_addr.u8[2], linkaddr_node_addr.u8[3],
-                linkaddr_node_addr.u8[4], linkaddr_node_addr.u8[5],
-                linkaddr_node_addr.u8[6], linkaddr_node_addr.u8[7]);
+        sprintf_P(topic, PSTR("%s/name"), myha_get_node_id());
         mqtt_publish(topic, "Rako Bridge", 0, 0);
         PROCESS_WAIT_EVENT_UNTIL(ev == mqtt_event);
 
-        sprintf(topic, "node/%02x%02x%02x%02x%02x%02x%02x%02x/dev/+/set/+",
-                linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1],
-                linkaddr_node_addr.u8[2], linkaddr_node_addr.u8[3],
-                linkaddr_node_addr.u8[4], linkaddr_node_addr.u8[5],
-                linkaddr_node_addr.u8[6], linkaddr_node_addr.u8[7]);
+        sprintf_P(topic, PSTR("%s/+/set/+"), myha_get_node_id());
 
         PRINTF("Myha: subscribing: %s...\n", topic);
         mqtt_subscribe(topic);
@@ -174,7 +163,7 @@ PROCESS_THREAD(rako_bridge_process, ev, data)
         PRINTF("Myha: got publish: %s = %s\n", topic, message);
         if(split_set_topic(topic, &house, &room, &channel, &name) == 0)
         {
-          if(strcmp(name, "set/level") == 0)
+          if(strcmp_P(name, PSTR("set/level")) == 0)
           {
             int level = atoi(message);
             rako_send_level(house, room, channel, level);
@@ -183,7 +172,7 @@ PROCESS_THREAD(rako_bridge_process, ev, data)
             PROCESS_WAIT_EVENT_UNTIL(ev == rako_sent_event);
             PRINTF("Myha: done\n");
           }
-          else if(strcmp(name, "set/scene") == 0)
+          else if(strcmp_P(name, PSTR("set/scene")) == 0)
           {
             int scene = atoi(message);
             if(scene == 0)
